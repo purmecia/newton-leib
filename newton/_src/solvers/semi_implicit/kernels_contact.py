@@ -533,11 +533,17 @@ def eval_body_contact(
     # Coulomb friction (smooth, but gradients are numerically unstable around |vt| = 0)
     ft = wp.vec3(0.0)
     if d < 0.0:
-        # use a smooth vector norm to avoid gradient instability at/around zero velocity
-        vs = wp.norm_huber(vt, delta=friction_smoothing)
-        if vs > 0.0:
-            fr = vt / vs
-            ft = fr * wp.min(kf * vs, -mu * (fn + fd))
+        if friction_smoothing <= 0.0:
+            # Match old Warp / rewarped exactly when callers opt out of smoothing.
+            vs = wp.length(vt)
+            if vs > 0.0:
+                ft = wp.normalize(vt) * wp.min(kf * vs, -mu * (fn + fd))
+        else:
+            # use a smooth vector norm to avoid gradient instability at/around zero velocity
+            vs = wp.norm_huber(vt, delta=friction_smoothing)
+            if vs > 0.0:
+                fr = vt / vs
+                ft = fr * wp.min(kf * vs, -mu * (fn + fd))
 
     f_total = n * (fn + fd) + ft
     # f_total = n * (fn + fd)

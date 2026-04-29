@@ -483,6 +483,7 @@ class CollisionPipeline:
         contact_matching_normal_dot_threshold: float = 0.995,
         contact_report: bool = False,
         verify_buffers: bool = True,
+        fresh_rigid_contact_buffers_for_grad: bool = False,
     ):
         """
         Initialize the CollisionPipeline (expert API).
@@ -541,6 +542,11 @@ class CollisionPipeline:
                 ``True``.  Overhead is one extra kernel launch per collision
                 pass; disable in hot loops or CUDA graph capture once buffer
                 sizes are known to be adequate.
+            fresh_rigid_contact_buffers_for_grad: If ``True`` and ``requires_grad``
+                is enabled, allocate fresh primary rigid-contact buffers on each
+                :meth:`collide` call instead of reusing the same storage. This is a
+                reversible experiment to mirror old ``warp.sim.collide()`` semantics
+                in taped multi-substep rollouts. Defaults to ``False``.
 
         .. note::
             When ``requires_grad`` is true (explicitly or via ``model.requires_grad``),
@@ -609,6 +615,7 @@ class CollisionPipeline:
         self.reduce_contacts = reduce_contacts
         self.requires_grad = requires_grad
         self.soft_contact_margin = soft_contact_margin
+        self.fresh_rigid_contact_buffers_for_grad = bool(fresh_rigid_contact_buffers_for_grad)
 
         using_expert_components = broad_phase_instance is not None or narrow_phase is not None
         if using_expert_components:
@@ -852,7 +859,27 @@ class CollisionPipeline:
             dtype=wp.vec2i,
             device=model.device,
         )
-
+        
+    def _freshen_rigid_contact_buffers_for_grad(self, contacts: Contacts) -> None:
+        # Recreate the solver-facing rigid-contact arrays so earlier taped
+        # substeps keep their own contact geometry instead of being overwritten
+        # by later collide() calls.
+        contacts.rigid_contact_count = wp.zeros_like(contacts.rigid_contact_count)
+        contacts.rigid_contact_shape0 = wp.empty_like(contacts.rigid_contact_shape0)
+        contacts.rigid_contact_shape1 = wp.empty_like(contacts.rigid_contact_shape1)
+        contacts.rigid_contact_point0 = wp.empty_like(contacts.rigid_contact_point0)
+        contacts.rigid_contact_point1 = wp.empty_like(contacts.rigid_contact_point1)
+        contacts.rigid_contact_offset0 = wp.empty_like(contacts.rigid_contact_offset0)
+        contacts.rigid_contact_offset1 = wp.empty_like(contacts.rigid_contact_offset1)
+        contacts.rigid_contact_normal = wp.empty_like(contacts.rigid_contact_normal)
+        contacts.rigid_contact_margin0 = wp.empty_like(contacts.rigid_contact_margin0)
+        contacts.rigid_contact_margin1 = wp.empty_like(contacts.rigid_contact_margin1)
+        contacts.rigid_contact_tids = wp.zeros_like(contacts.rigid_contact_tids)
+        if contacts.rigid_contact_stiffness is not None:
+            contacts.rigid_contact_stiffness = wp.empty_like(contacts.rigid_contact_stiffness)
+            contacts.rigid_contact_damping = wp.empty_like(contacts.rigid_contact_damping)
+            contacts.rigid_contact_friction = wp.empty_like(contacts.rigid_contact_friction)
+  
     def collide(
         self,
         state: State,
@@ -891,6 +918,12 @@ class CollisionPipeline:
         # afterwards -- otherwise the generation would advance by 2 per collide() call.
         if contacts.clear_buffers:
             contacts.clear(bump_generation=False)
+        if self.requires_grad and self.fresh_rigid_contact_buffers_for_grad and contacts.rigid_contact_max:
+            self._freshen_rigid_contact_buffers_for_grad(contacts)
+        # TODO: validate contacts dimensions & compatibility
+
+        # Clear counters
+        self.broad_phase_pair_count.zero_()
 
         model = self.model
         # update any additional parameters
@@ -996,9 +1029,23 @@ class CollisionPipeline:
         writer_data.out_margin1 = contacts.rigid_contact_margin1
         writer_data.out_tids = contacts.rigid_contact_tids
 
-        writer_data.out_stiffness = contacts.rigid_contact_stiffness
-        writer_data.out_damping = contacts.rigid_contact_damping
-        writer_data.out_friction = contacts.rigid_contact_friction
+        empty_contact_float = wp.zeros(0, dtype=wp.float32, device=self.device)
+        writer_data.out_stiffness = (
+            contacts.rigid_contact_stiffness
+            if contacts.rigid_contact_stiffness is not None
+            else empty_contact_float
+        )
+        writer_data.out_damping = (
+            contacts.rigid_contact_damping
+            if contacts.rigid_contact_damping is not None
+            else empty_contact_float
+        )
+        writer_data.out_friction = (
+            contacts.rigid_contact_friction
+            if contacts.rigid_contact_friction is not None
+            else empty_contact_float
+        )
+        
         if self.deterministic and contacts.rigid_contact_max != self._sort_key_array.shape[0]:
             raise ValueError(
                 f"Contacts buffer capacity ({contacts.rigid_contact_max}) does not match the "

@@ -353,6 +353,7 @@ class SolverFeatherstone(SolverBase):
 
             # derived rigid body data (maximal coordinates)
             target.body_q_prev = wp.empty_like(model.body_q, requires_grad=requires_grad)
+            target.body_q_fk = wp.empty_like(model.body_q, requires_grad=requires_grad)
             target.body_q_com = wp.empty_like(model.body_q, requires_grad=requires_grad)
             target.body_I_s = wp.empty(
                 (model.body_count,), dtype=wp.spatial_matrix, device=model.device, requires_grad=requires_grad
@@ -367,6 +368,9 @@ class SolverFeatherstone(SolverBase):
                 (model.body_count,), dtype=wp.spatial_vector, device=model.device, requires_grad=requires_grad
             )
             target.body_f_ext = wp.zeros(
+                (model.body_count,), dtype=wp.spatial_vector, device=model.device, requires_grad=requires_grad
+            )
+            target.body_f_total = wp.zeros(
                 (model.body_count,), dtype=wp.spatial_vector, device=model.device, requires_grad=requires_grad
             )
             target.body_ft_s = wp.zeros(
@@ -395,6 +399,7 @@ class SolverFeatherstone(SolverBase):
 
         model = self.model
         descendant_body_q_prev = state_in.body_q
+        current_body_q = state_in.body_q
 
         if not getattr(state_aug, "_featherstone_augmented", False):
             self._allocate_state_aux_vars(model, state_aug, requires_grad)
@@ -423,12 +428,15 @@ class SolverFeatherstone(SolverBase):
                         model.joint_axis,
                         model.joint_dof_dim,
                     ],
-                    outputs=[state_in.body_q, state_aug.body_q_com],
+                    outputs=[state_aug.body_q_fk, state_aug.body_q_com],
                     device=model.device,
                 )
+                current_body_q = state_aug.body_q_fk
                 if step_in_place and self.descendant_free_distance_joint_indices is not None:
-                    wp.copy(state_aug.body_q_prev, state_in.body_q)
+                    wp.copy(state_aug.body_q_prev, current_body_q)
                     descendant_body_q_prev = state_aug.body_q_prev
+                elif self.descendant_free_distance_joint_indices is not None:
+                    descendant_body_q_prev = current_body_q
 
             particle_f = None
             body_f = None
@@ -438,11 +446,10 @@ class SolverFeatherstone(SolverBase):
 
             if state_in.body_count:
                 body_f = state_aug.body_f_ext
-                wp.copy(body_f, state_in.body_f)
                 wp.launch(
                     convert_body_force_com_to_origin,
                     dim=model.body_count,
-                    inputs=[state_in.body_q, self.body_X_com],
+                    inputs=[current_body_q, self.body_X_com, state_in.body_f],
                     outputs=[body_f],
                     device=model.device,
                 )
@@ -454,7 +461,7 @@ class SolverFeatherstone(SolverBase):
                             model.joint_type,
                             model.joint_child,
                             model.joint_qd_start,
-                            state_in.body_q,
+                            current_body_q,
                             self.body_X_com,
                             control.joint_f,
                         ],
@@ -497,7 +504,7 @@ class SolverFeatherstone(SolverBase):
                         model.joint_child,
                         model.joint_qd_start,
                         model.joint_X_p,
-                        state_in.body_q,
+                        current_body_q,
                         model.body_com,
                         state_in.joint_qd,
                     ],
@@ -536,7 +543,7 @@ class SolverFeatherstone(SolverBase):
                         model.joint_axis,
                         model.joint_dof_dim,
                         self.body_I_m,
-                        state_in.body_q,
+                        current_body_q,
                         state_aug.body_q_com,
                         model.joint_X_p,
                         model.body_world,
@@ -553,11 +560,13 @@ class SolverFeatherstone(SolverBase):
                 )
 
                 if contacts is not None and contacts.rigid_contact_max:
+                    body_f_total = state_aug.body_f_total
+                    wp.copy(body_f_total, body_f)
                     wp.launch(
                         kernel=eval_body_contact,
                         dim=contacts.rigid_contact_max,
                         inputs=[
-                            state_in.body_q,
+                            current_body_q,
                             state_aug.body_v_s,
                             model.body_com,
                             model.shape_material_ke,
@@ -580,9 +589,10 @@ class SolverFeatherstone(SolverBase):
                             True,
                             self.friction_smoothing,
                         ],
-                        outputs=[body_f],
+                        outputs=[body_f_total],
                         device=model.device,
                     )
+                    body_f = body_f_total
 
                 if self.has_kinematic_bodies and body_f is not None:
                     wp.launch(

@@ -806,15 +806,17 @@ def compute_link_velocity(
 def convert_body_force_com_to_origin(
     body_q: wp.array[wp.transform],
     body_X_com: wp.array[wp.transform],
+    body_f_com: wp.array[wp.spatial_vector],
     # outputs
     body_f_ext: wp.array[wp.spatial_vector],
 ):
     tid = wp.tid()
 
-    f_ext_com = body_f_ext[tid]
+    f_ext_com = body_f_com[tid]
 
     # skip if force is zero
     if wp.length(f_ext_com) == 0.0:
+        body_f_ext[tid] = f_ext_com
         return
 
     body_q_com_val = body_q[tid] * body_X_com[tid]
