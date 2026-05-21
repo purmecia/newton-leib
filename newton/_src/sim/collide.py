@@ -922,7 +922,7 @@ class CollisionPipeline:
             self._freshen_rigid_contact_buffers_for_grad(contacts)
         # TODO: validate contacts dimensions & compatibility
 
-        # Clear counters
+        # Clear counters explicitly, not strictly necessary since they are zeroed by thread 0 of compute_shape_aabbs
         self.broad_phase_pair_count.zero_()
 
         model = self.model
