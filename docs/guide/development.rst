@@ -140,6 +140,19 @@ in a serial manner with ``--serial-fallback``.
 
 Pass ``--help`` to either run method below to see all available flags.
 
+.. note::
+
+    If a test run aborts with ``concurrent.futures.process.BrokenProcessPool``,
+    a worker process crashed (out-of-memory, segfault, or similar). The runner
+    parallelizes across ``min(cpu_count, 8)`` workers by default; on
+    memory-constrained machines this can saturate RAM and kill a worker.
+    Retry with fewer workers via ``--jobs`` (or ``--serial-fallback`` for a
+    single process):
+
+    .. code-block:: console
+
+        python -m newton.tests --jobs 4
+
 .. tab-set::
     :sync-group: env
 
@@ -516,7 +529,7 @@ API documentation
 -----------------
 
 Newton's API reference is auto-generated from the ``__all__`` lists of its public modules.
-The script ``docs/generate_api.py`` produces reStructuredText files under ``docs/api/`` (git-ignored)
+The script ``docs/generate_api.py`` produces reStructuredText files under ``docs/api/``
 that Sphinx processes via ``autosummary`` to create individual pages for every public symbol.
 
 Whenever you add, remove, or rename a public symbol in one of the public modules

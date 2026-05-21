@@ -247,6 +247,31 @@ class TestImportMjcfBasic(unittest.TestCase):
         # So [0.7071068, 0, 0, 0.7071068] becomes [0, 0, 0.7071068, 0.7071068]
         np.testing.assert_allclose(body_quat, [0, 0, 0.7071068, 0.7071068], atol=1e-6)
 
+    def test_xyaxes_uses_x_and_y_axes(self):
+        """MJCF xyaxes specifies X then Y, not X then Z."""
+        mjcf_content = """<?xml version="1.0" encoding="utf-8"?>
+<mujoco model="test">
+    <worldbody>
+        <body name="test_body" xyaxes="1 0 0 0 0 1">
+            <geom type="box" size="0.1 0.1 0.1"/>
+        </body>
+    </worldbody>
+</mujoco>"""
+
+        builder = newton.ModelBuilder()
+        builder.add_mjcf(mjcf_content)
+        model = builder.finalize()
+
+        body_idx = model.body_label.index("test/worldbody/test_body")
+        body_quat = model.body_q.numpy()[body_idx, 3:]
+        quat = wp.quat(*body_quat)
+
+        actual_y = np.array(wp.quat_rotate(quat, wp.vec3(0.0, 1.0, 0.0)), dtype=np.float64)
+        actual_z = np.array(wp.quat_rotate(quat, wp.vec3(0.0, 0.0, 1.0)), dtype=np.float64)
+
+        np.testing.assert_allclose(actual_y, [0.0, 0.0, 1.0], atol=1e-6)
+        np.testing.assert_allclose(actual_z, [0.0, -1.0, 0.0], atol=1e-6)
+
     def test_site_euler_sequence_matches_mujoco(self):
         """Non-default compiler eulerseq should match MuJoCo site orientation."""
         mjcf_content = """<?xml version="1.0" encoding="utf-8"?>
@@ -2310,6 +2335,32 @@ class TestImportMjcfGeometry(unittest.TestCase):
             expected_mass,
             places=2,
             msg=f"Visual geom with default density should produce mass={expected_mass}, got {actual_mass}",
+        )
+
+    def test_visual_geom_explicit_mass_with_parse_visuals(self):
+        """Regression: visual geoms must honor explicit mass when parse_visuals=True."""
+        mjcf = """<?xml version="1.0" ?>
+<mujoco>
+  <worldbody>
+    <body name="test" pos="0 0 0.5">
+      <joint type="hinge" axis="0 0 1"/>
+      <geom name="vis" type="box" size="0.1 0.1 0.1"
+            contype="0" conaffinity="0" group="2" mass="5"/>
+      <geom name="col" type="box" size="0.1 0.1 0.1"
+            mass="0" group="3"/>
+    </body>
+  </worldbody>
+</mujoco>"""
+        builder = newton.ModelBuilder()
+        builder.add_mjcf(mjcf, parse_visuals=True)
+        model = builder.finalize()
+
+        actual_mass = float(model.body_mass.numpy()[0])
+        self.assertAlmostEqual(actual_mass, 5.0, places=4, msg=f"Expected visual geom mass=5.0, got {actual_mass}")
+        self.assertGreater(
+            float(np.trace(model.body_inertia.numpy()[0])),
+            0.0,
+            msg="Visual geom with explicit mass should contribute non-zero inertia",
         )
 
     def test_inertial_locks_body_against_frame_geom_mass(self):
