@@ -54,8 +54,8 @@ CABLE_MU = 2.0
 LATCH_LIMIT_LOWER = -0.2  # max inward deflection [rad]
 LATCH_LIMIT_UPPER = 0.3  # max outward deflection [rad]
 LATCH_SPRING_KE = 0.15  # angular return-spring stiffness [N*m/rad]
-LATCH_SPRING_KD = 0.2  # dimensionless damping ratio (VBD: D = kd * ke)
-LATCH_LIMIT_KD = 1.0e-4  # dimensionless limit damping (VBD: D = kd * limit_ke)
+LATCH_SPRING_KD = 0.03  # angular return-spring damping [N*m*s/rad]
+LATCH_LIMIT_KD = 1.0e-4  # angular limit damping [N*m*s/rad]
 
 
 @wp.kernel
@@ -239,6 +239,7 @@ class Example:
         latch_mesh, lc = _load_mesh(stage, "/World/Latch")
 
         builder = newton.ModelBuilder(gravity=-9.81)
+        SolverVBD.register_custom_attributes(builder, dahl_defaults_enabled=False)
         builder.rigid_gap = 0.005
 
         builder.add_ground_plane()
@@ -290,6 +291,7 @@ class Example:
             angular_axes=None,
             parent_xform=wp.transform(plug_pos, wp.quat_identity()),
             child_xform=wp.transform_identity(),
+            custom_attributes={"vbd:joint_is_hard": 0},
         )
 
         # Revolute joint: plug -> latch (hinge along -X axis)
@@ -305,6 +307,7 @@ class Example:
             limit_upper=LATCH_LIMIT_UPPER,
             limit_kd=LATCH_LIMIT_KD,
             collision_filter_parent=True,
+            custom_attributes={"vbd:joint_is_hard": 0},
         )
 
         builder.add_articulation([d6_joint, rev_joint])
@@ -324,7 +327,7 @@ class Example:
                 mu=CABLE_MU,
             ),
             bend_stiffness=bend_stiffness,
-            bend_damping=1.0e-1,
+            bend_damping=1.0e0,
             label="cable",
         )
 
@@ -387,8 +390,6 @@ class Example:
             rigid_contact_hard=False,
             rigid_body_contact_buffer_size=256,
         )
-        for j in range(self.model.joint_count):
-            self.solver.set_joint_constraint_mode(j, False)
 
         self._rest_pos = plug_pos
         self.gizmo_tf = wp.transform(plug_pos, wp.quat_identity())
