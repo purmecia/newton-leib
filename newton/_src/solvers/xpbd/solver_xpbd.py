@@ -5,7 +5,10 @@ import warp as wp
 
 from ...core.types import override
 from ...sim import Contacts, Control, Model, ModelFlags, State
+from ...utils.deprecation import deprecate_nonkeyword_arguments
+from ..coupled.interface import CouplingInterface
 from ..solver import SolverBase
+from . import kernels
 from .kernels import (
     accumulate_weighted_contact_impulse,
     apply_body_delta_velocities,
@@ -29,7 +32,7 @@ from .kernels import (
 )
 
 
-class SolverXPBD(SolverBase):
+class SolverXPBD(SolverBase, CouplingInterface):
     """An implicit integrator using eXtended Position-Based Dynamics (XPBD) for rigid and soft body simulation.
 
     References:
@@ -93,9 +96,11 @@ class SolverXPBD(SolverBase):
 
     """
 
+    @deprecate_nonkeyword_arguments
     def __init__(
         self,
         model: Model,
+        *,
         iterations: int = 2,
         soft_body_relaxation: float = 0.9,
         soft_contact_relaxation: float = 0.9,
@@ -107,8 +112,26 @@ class SolverXPBD(SolverBase):
         rigid_contact_con_weighting: bool = True,
         angular_damping: float = 0.0,
         enable_restitution: bool = False,
+        deterministic: wp.DeterministicMode | None = None,
     ):
+        """Initialize the solver.
+
+        Args:
+            deterministic: Opt-in determinism for this solver's atomic-emitting
+                kernel module. Pass a :class:`warp.DeterministicMode`, or
+                ``None`` (default) to inherit the current
+                ``wp.config.deterministic`` mode.
+        """
         super().__init__(model=model)
+        effective_deterministic = deterministic if deterministic is not None else wp.config.deterministic
+        self._set_module_options(
+            {
+                "deterministic": effective_deterministic,
+                "deterministic_max_records": 0,
+            },
+            module=kernels,
+        )
+
         self.iterations = iterations
 
         self.soft_body_relaxation = soft_body_relaxation
@@ -141,8 +164,13 @@ class SolverXPBD(SolverBase):
 
     @override
     def notify_model_changed(self, flags: ModelFlags | int) -> None:
+        self._apply_module_options()
         if flags & (ModelFlags.BODY_PROPERTIES | ModelFlags.BODY_INERTIAL_PROPERTIES):
             self._refresh_kinematic_state()
+
+    @override
+    def coupling_supports_inertial_property_refresh(self) -> bool:
+        return True
 
     def copy_kinematic_body_state(self, model: Model, state_in: State, state_out: State):
         if model.body_count == 0:
@@ -259,6 +287,7 @@ class SolverXPBD(SolverBase):
 
     @override
     def step(self, state_in: State, state_out: State, control: Control, contacts: Contacts, dt: float) -> None:
+        self._apply_module_options()
         requires_grad = state_in.requires_grad
         self._particle_delta_counter = 0
         self._body_delta_counter = 0
@@ -407,6 +436,7 @@ class SolverXPBD(SolverBase):
                                     model.body_com,
                                     self.body_inv_mass_effective,
                                     self.body_inv_inertia_effective,
+                                    model.body_flags,
                                     model.shape_body,
                                     model.shape_material_mu,
                                     model.soft_contact_mu,
@@ -802,6 +832,7 @@ class SolverXPBD(SolverBase):
             ValueError: If ``contacts.force`` is ``None`` (not requested), if no step has been run yet,
                 or if the contacts capacity does not match the one used in the last :meth:`step`.
         """
+        self._apply_module_options()
         if contacts.force is None:
             raise ValueError(
                 "contacts.force is not allocated. Call model.request_contact_attributes('force') "

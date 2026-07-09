@@ -209,13 +209,14 @@ class Example:
                 twist_total=0.0,
             )
 
-            _rod_bodies, _rod_joints = builder.add_rod(
+            builder.add_rod(
                 positions=points,
                 quaternions=quats,
                 radius=self.cable_radius,
                 bend_stiffness=bend_stiffness,
                 bend_damping=bend_damping,
                 label=f"bundle_cable_{i}",
+                body_frame_origin="com",
             )
 
         # Create moving obstacles (capsules arranged along X axis)
@@ -315,17 +316,14 @@ class Example:
         # Time tracking for obstacle motion (stored in device array for graph capture)
         self.sim_time_array = wp.zeros(1, dtype=float, device=self.solver.device)
 
-        # Initialize CUDA graph
+        # Initialize graph capture
         self.capture()
 
     def capture(self):
-        """Capture simulation loop into a CUDA graph for optimal GPU performance."""
-        if self.solver.device.is_cuda:
-            with wp.ScopedCapture() as capture:
-                self.simulate()
-            self.graph = capture.graph
-        else:
-            self.graph = None
+        """Capture the simulation loop into a graph for optimal performance."""
+        with wp.ScopedCapture() as capture:
+            self.simulate()
+        self.graph = capture.graph
 
     def simulate(self):
         """Execute all simulation substeps for one frame."""

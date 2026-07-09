@@ -81,7 +81,7 @@ def eval_particle_contact(
 
                 f += particle_force(n, vrel, err, k_contact, k_damp, k_friction, k_mu)
 
-    particle_f[i] = f
+    particle_f[i] += f
 
 
 @wp.kernel
@@ -215,7 +215,7 @@ def eval_particle_body_contact(
     body_w = wp.spatial_bottom(body_v_s)
     body_v = wp.spatial_top(body_v_s)
 
-    # compute the body velocity at the particle position
+    # body velocity at the particle position
     bv = body_v + wp.transform_vector(X_wb, contact_body_vel[tid])
     if body_f_in_world_frame:
         bv += wp.cross(body_w, bx)
@@ -295,7 +295,7 @@ def eval_triangles_body_contact(
     # hard coded surface parameter tensor layout (ke, kd, kf, mu)
     ke = materials[c_mat * 4 + 0]  # restitution coefficient
     kd = materials[c_mat * 4 + 1]  # damping coefficient
-    kf = materials[c_mat * 4 + 2]  # friction coefficient
+    kf = materials[c_mat * 4 + 2]  # contact friction gain
     mu = materials[c_mat * 4 + 3]  # coulomb friction
 
     x0 = body_x[c_body]  # position of colliding body
@@ -414,7 +414,7 @@ def eval_body_contact(
     # retrieve contact margins, compute average contact material properties
     ke = 0.0  # contact normal force stiffness
     kd = 0.0  # damping coefficient
-    kf = 0.0  # friction force stiffness
+    kf = 0.0  # contact friction gain
     ka = 0.0  # adhesion distance
     mu = 0.0  # friction coefficient
     mat_nonzero = 0
@@ -516,7 +516,10 @@ def eval_body_contact(
     fn = d * ke
 
     # contact damping
-    fd = wp.min(vn, 0.0) * kd * wp.step(d)
+    # Match DFlex articulated contact: damping is active only during
+    # penetration and is scaled by penetration depth. Without the ``-d`` factor,
+    # shallow contacts become over-damped and Hopper cannot push off cleanly.
+    fd = wp.min(vn, 0.0) * kd * wp.step(d) * (0.0 - d)
 
     # viscous friction
     # ft = vt*kf
@@ -538,12 +541,19 @@ def eval_body_contact(
             vs = wp.length(vt)
             if vs > 0.0:
                 ft = wp.normalize(vt) * wp.min(kf * vs, -mu * (fn + fd))
+                # DFlex's articulated rigid contact caps smooth Coulomb friction
+                # by spring force only: -mu * penetration * ke.  Including the
+                # damping term makes touchdown friction impulses too large.
+                # ft = wp.normalize(vt) * wp.min(kf * vs, -mu * fn)
         else:
             # use a smooth vector norm to avoid gradient instability at/around zero velocity
             vs = wp.norm_huber(vt, delta=friction_smoothing)
             if vs > 0.0:
                 fr = vt / vs
                 ft = fr * wp.min(kf * vs, -mu * (fn + fd))
+                # Match DFlex: the friction cone is based on the elastic normal
+                # force, not the transient damping impulse at impact.
+                # ft = fr * wp.min(kf * vs, -mu * fn)
 
     f_total = n * (fn + fd) + ft
     # f_total = n * (fn + fd)
@@ -611,16 +621,22 @@ def eval_body_contact_forces(
     friction_smoothing: float = 1.0,
     force_in_world_frame: bool = False,
     body_f_out: wp.array | None = None,
+    body_q: wp.array | None = None,
+    body_qd: wp.array | None = None,
 ):
     if contacts is not None and contacts.rigid_contact_max:
         if body_f_out is None:
             body_f_out = state.body_f
+        if body_q is None:
+            body_q = state.body_q
+        if body_qd is None:
+            body_qd = state.body_qd
         wp.launch(
             kernel=eval_body_contact,
             dim=contacts.rigid_contact_max,
             inputs=[
-                state.body_q,
-                state.body_qd,
+                body_q,
+                body_qd,
                 model.body_com,
                 model.shape_material_ke,
                 model.shape_material_kd,
@@ -654,16 +670,22 @@ def eval_particle_body_contact_forces(
     particle_f: wp.array,
     body_f: wp.array,
     body_f_in_world_frame: bool = False,
+    body_q: wp.array | None = None,
+    body_qd: wp.array | None = None,
 ):
     if contacts is not None and contacts.soft_contact_max:
+        if body_q is None:
+            body_q = state.body_q
+        if body_qd is None:
+            body_qd = state.body_qd
         wp.launch(
             kernel=eval_particle_body_contact,
             dim=contacts.soft_contact_max,
             inputs=[
                 state.particle_q,
                 state.particle_qd,
-                state.body_q,
-                state.body_qd,
+                body_q,
+                body_qd,
                 model.particle_radius,
                 model.particle_flags,
                 model.body_com,
