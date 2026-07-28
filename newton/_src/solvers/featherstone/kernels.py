@@ -1281,10 +1281,16 @@ def eval_rigid_id(
     if start < end:
         root = start
         root_type = joint_type[root]
-        if root_type == JointType.FREE or root_type == JointType.DISTANCE:
-            # Floating roots are the numerically sensitive case: translating
-            # the internal frame to the root COM keeps moment arms small while
-            # preserving the public COM/world twist and wrench contract.
+        root_has_linear_dof = joint_dof_dim[root, 0] > 0
+        if (
+            root_type == JointType.FREE
+            or root_type == JointType.DISTANCE
+            or root_has_linear_dof
+        ):
+            # Any root with translational motion is numerically sensitive:
+            # translating the internal frame to the root COM keeps moment arms
+            # small while preserving the public COM/world twist and wrench
+            # contract. This includes prismatic and linear D6 roots.
             solve_origin = wp.transform_get_translation(body_q_com[joint_child[root]])
 
     # compute link velocities and coriolis forces in the internal solve frame
@@ -1383,7 +1389,8 @@ def eval_rigid_tau(
         torque_com = wp.spatial_bottom(f_ext_public)
         x_com_s = wp.transform_get_translation(body_q_com[child]) - body_solve_origin[child]
         f_ext = -wp.spatial_vector(force, torque_com + wp.cross(x_com_s, force))
-        body_f_ext[child] = f_ext
+        # Keep body_f_ext in its public COM/world convention. Overwriting this
+        # taped input drops the contact-force adjoint through the frame shift.
         f_s = f_b_s + f_t_s + f_ext
 
         # compute joint-space forces, writes out tau
@@ -2383,8 +2390,8 @@ def compute_body_parent_f(
 
     * ``body_f_s = I*a + spatial_cross_dual(v, I*v) - f_g_s``  (inertial bias minus gravity)
     * ``body_ft_s``                          (accumulated descendant wrenches)
-    * ``body_f_ext``                         (external + contact wrenches,
-      stored with the negated sign convention used by ``eval_rigid_tau``)
+    * ``body_f_ext``                         (external + contact wrenches in
+      the public world-frame/COM convention)
 
     Their sum is the spatial wrench transmitted from the parent through the
     inbound joint, expressed in Featherstone's internal solve frame. For
@@ -2404,11 +2411,16 @@ def compute_body_parent_f(
     """
     tid = wp.tid()
 
-    f_s = body_f_s[tid] + body_ft_s[tid] + body_f_ext[tid]
+    f_ext_public = body_f_ext[tid]
+    force = wp.spatial_top(f_ext_public)
+    torque_com = wp.spatial_bottom(f_ext_public)
+    r_com = wp.transform_get_translation(body_q_com[tid]) - body_solve_origin[tid]
+    f_ext_s = -wp.spatial_vector(force, torque_com + wp.cross(r_com, force))
+
+    f_s = body_f_s[tid] + body_ft_s[tid] + f_ext_s
     f_lin = wp.spatial_top(f_s)
     f_ang_at_origin = wp.spatial_bottom(f_s)
 
-    r_com = wp.transform_get_translation(body_q_com[tid]) - body_solve_origin[tid]
     f_ang_at_com = f_ang_at_origin - wp.cross(r_com, f_lin)
 
     body_parent_f[tid] = wp.spatial_vector(f_lin, f_ang_at_com)
